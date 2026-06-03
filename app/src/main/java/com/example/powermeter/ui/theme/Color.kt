@@ -1,4 +1,4 @@
-package com.example.complementary_filter.ui.theme
+package com.example.powermeter.ui.theme
 
 import androidx.compose.ui.graphics.Color
 

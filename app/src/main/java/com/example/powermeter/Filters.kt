@@ -1,4 +1,4 @@
-package com.example.complementary_filter
+package com.example.powermeter
 
 import kotlin.math.PI
 import kotlin.math.atan2
@@ -51,12 +51,7 @@ class ComplementaryFilter(private val alpha: Float = 0.96f) {
 }
 
 fun calculateAnglesFromAccel(ax: Float, ay: Float, az: Float): Pair<Float, Float> {
-    // Robust Formulas to avoid Gimbal Lock jumps
-    // Roll: Rotation around Y-axis. Stable even when Z is zero.
     val roll = atan2(ax, sqrt(ay * ay + az * az)) * 180 / PI.toFloat()
-    
-    // Pitch: Rotation around X-axis.
     val pitch = atan2(-ay, sqrt(ax * ax + az * az)) * 180 / PI.toFloat()
-
     return Pair(roll, pitch)
 }

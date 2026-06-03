@@ -1,4 +1,4 @@
-package com.example.complementary_filter
+package com.example.powermeter
 
 import android.content.Context
 import android.content.Intent
@@ -20,7 +20,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -28,7 +27,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.complementary_filter.ui.theme.Complementary_filterTheme
+import com.example.powermeter.ui.theme.PowerMeterTheme
 import kotlinx.coroutines.delay
 import kotlin.math.abs
 
@@ -37,7 +36,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            Complementary_filterTheme {
+            PowerMeterTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     PowerMeterProScreen(modifier = Modifier.padding(innerPadding))
                 }
@@ -140,7 +139,7 @@ fun PowerMeterProScreen(modifier: Modifier = Modifier) {
             colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF9C4))
         ) {
             Text(
-                "정밀 모드: 'adb shell pm grant com.example.complementary_filter android.permission.BATTERY_STATS' 실행 권장",
+                "정밀 모드: 'adb shell pm grant com.example.powermeter android.permission.BATTERY_STATS' 실행 권장",
                 fontSize = 10.sp, color = Color.DarkGray, modifier = Modifier.padding(8.dp)
             )
         }

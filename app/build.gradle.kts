@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "com.example.complementary_filter"
+    namespace = "com.example.powermeter"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.example.complementary_filter"
+        applicationId = "com.example.powermeter"
         minSdk = 26
         targetSdk = 36
         versionCode = 1
