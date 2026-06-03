@@ -1,22 +1,21 @@
 package com.example.complementary_filter
 
 import android.content.Context
-import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
-import android.hardware.SensorManager
+import android.content.Intent
+import android.content.IntentFilter
+import android.net.wifi.WifiManager
+import android.os.BatteryManager
 import android.os.Bundle
-import android.util.Log
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.rememberTransformableState
-import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -24,15 +23,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.complementary_filter.ui.theme.Complementary_filterTheme
-import kotlin.math.*
+import kotlinx.coroutines.delay
+import kotlin.math.abs
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -41,197 +39,255 @@ class MainActivity : ComponentActivity() {
         setContent {
             Complementary_filterTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    FilterComparisonScreen(modifier = Modifier.padding(innerPadding))
+                    PowerMeterProScreen(modifier = Modifier.padding(innerPadding))
                 }
             }
         }
     }
 }
 
+data class HardwareUsage(val name: String, val currentMa: Float, val color: Color, val factor: Float)
+
 @Composable
-fun FilterComparisonScreen(modifier: Modifier = Modifier) {
+fun PowerMeterProScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
-    val sensorManager = remember { context.getSystemService(Context.SENSOR_SERVICE) as SensorManager }
+    val batteryManager = remember { context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager }
+    val wifiManager = remember { context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager }
 
-    var filteredAccel by remember { mutableStateOf(floatArrayOf(0f, 0f, 9.81f)) }
-    var systemGravity by remember { mutableStateOf(floatArrayOf(0f, 0f, 9.81f)) }
-    var gyroValues by remember { mutableStateOf(floatArrayOf(0f, 0f, 0f)) }
+    // Measurements
+    var voltageMv by remember { mutableFloatStateOf(0f) }
+    var tempC by remember { mutableFloatStateOf(0f) }
+    var stableCurrentMa by remember { mutableFloatStateOf(0f) }
+    
+    // Tracking
+    var offsetMa by remember { mutableFloatStateOf(0f) }
+    var isMonitoring by remember { mutableStateOf(false) }
+    var showReport by remember { mutableStateOf(false) }
 
-    val kalmanRoll = remember { KalmanFilter() }
-    val kalmanPitch = remember { KalmanFilter() }
-    val compRoll = remember { ComplementaryFilter(0.96f) }
-    val compPitch = remember { ComplementaryFilter(0.96f) }
+    val sampleBuffer = remember { mutableStateListOf<Float>() }
+    val graphData = remember { mutableStateListOf<Float>() }
+    var hwBreakdown by remember { mutableStateOf(listOf<HardwareUsage>()) }
 
-    var kalmanAngles by remember { mutableStateOf(Pair(0f, 0f)) }
-    var compAngles by remember { mutableStateOf(Pair(0f, 0f)) }
-    var refAngles by remember { mutableStateOf(Pair(0f, 0f)) }
-
-    var lastTimestamp by remember { mutableLongStateOf(0L) }
-    var scale by remember { mutableFloatStateOf(1f) }
-    val transformState = rememberTransformableState { zoomChange, _, _ ->
-        scale = (scale * zoomChange).coerceIn(0.5f, 3f)
-    }
-
-    val sensorEventListener = remember {
-        object : SensorEventListener {
-            override fun onSensorChanged(event: SensorEvent?) {
-                event ?: return
-                when (event.sensor.type) {
-                    Sensor.TYPE_ACCELEROMETER -> {
-                        val alpha = 0.15f
-                        filteredAccel = floatArrayOf(
-                            filteredAccel[0] + alpha * (event.values[0] - filteredAccel[0]),
-                            filteredAccel[1] + alpha * (event.values[1] - filteredAccel[1]),
-                            filteredAccel[2] + alpha * (event.values[2] - filteredAccel[2])
-                        )
-                    }
-                    Sensor.TYPE_GRAVITY -> {
-                        systemGravity = event.values.clone()
-                    }
-                    Sensor.TYPE_GYROSCOPE -> {
-                        gyroValues = event.values.clone()
-                        if (lastTimestamp != 0L) {
-                            val dt = (event.timestamp - lastTimestamp) * 1e-9f
-                            if (dt > 0.5f) { lastTimestamp = event.timestamp; return }
-
-                            // Using robust angle calculation from Filters.kt
-                            val (accRoll, accPitch) = calculateAnglesFromAccel(systemGravity[0], systemGravity[1], systemGravity[2])
-                            refAngles = Pair(accRoll, accPitch)
-
-                            // Gyro rates: X is Pitch Rate, Y is Roll Rate
-                            val gr = gyroValues[1] * 180f / PI.toFloat()
-                            val gp = gyroValues[0] * 180f / PI.toFloat()
-
-                            kalmanAngles = Pair(
-                                kalmanRoll.update(accRoll, gr, dt),
-                                kalmanPitch.update(accPitch, gp, dt)
-                            )
-                            compAngles = Pair(
-                                compRoll.update(accRoll, gr, dt),
-                                compPitch.update(accPitch, gp, dt)
-                            )
-                            
-                            // Debug log to verify stability
-                            if (abs(gr) > 50 || abs(gp) > 50) {
-                                Log.d("SensorDebug", "Stable R: $accRoll, P: $accPitch | Gyro: $gr, $gp")
-                            }
-                        }
-                        lastTimestamp = event.timestamp
-                    }
-                }
-            }
-            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
-        }
-    }
-
-    DisposableEffect(Unit) {
-        val accel = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-        val gyro = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
-        val grav = sensorManager.getDefaultSensor(Sensor.TYPE_GRAVITY)
-        sensorManager.registerListener(sensorEventListener, accel, SensorManager.SENSOR_DELAY_UI)
-        sensorManager.registerListener(sensorEventListener, gyro, SensorManager.SENSOR_DELAY_UI)
-        sensorManager.registerListener(sensorEventListener, grav, SensorManager.SENSOR_DELAY_UI)
-        onDispose { sensorManager.unregisterListener(sensorEventListener) }
-    }
-
-    Column(modifier = modifier.fillMaxSize().padding(16.dp)) {
-        Text("3D Filter Comparison", fontSize = 28.sp, fontWeight = FontWeight.ExtraBold, color = Color.Black, modifier = Modifier.align(Alignment.CenterHorizontally))
-        
-        Row(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
-            DataBox("Roll", kalmanAngles.first, compAngles.first)
-            DataBox("Pitch", kalmanAngles.second, compAngles.second)
-        }
-
-        LazyVerticalGrid(
-            columns = GridCells.Fixed(2),
-            modifier = Modifier.weight(1f).transformable(transformState),
-            contentPadding = PaddingValues(4.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            item { FilterCard("LPF (Raw)", filteredAccel, refAngles, Color(0xFFE3F2FD), scale) }
-            item { FilterCard("System Gravity", systemGravity, refAngles, Color(0xFFF1F8E9), scale) }
-            item { FilterCard("Complementary", systemGravity, compAngles, Color(0xFFFFF3E0), scale) }
-            item { FilterCard("Kalman", systemGravity, kalmanAngles, Color(0xFFF3E5F5), scale) }
-        }
-    }
-}
-
-@Composable
-fun DataBox(label: String, kalman: Float, comp: Float) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(label, fontWeight = FontWeight.Bold, color = Color.Gray, fontSize = 14.sp)
-        Text("K: ${"%.1f".format(kalman)}°", fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, color = Color.Black)
-        Text("C: ${"%.1f".format(comp)}°", fontSize = 16.sp, color = Color.DarkGray)
-    }
-}
-
-@Composable
-fun FilterCard(title: String, gData: FloatArray, angles: Pair<Float, Float>, bgColor: Color, scale: Float) {
-    Card(colors = CardDefaults.cardColors(containerColor = bgColor), elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)) {
-        Column(modifier = Modifier.padding(12.dp).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(title, fontWeight = FontWeight.ExtraBold, fontSize = 16.sp, color = Color.Black)
-            Text("R: ${"%.1f".format(angles.first)}° P: ${"%.1f".format(angles.second)}°", fontSize = 14.sp, color = Color.Black)
+    // 1. High-speed Sampling (50ms)
+    LaunchedEffect(Unit) {
+        while (true) {
+            val currentUa = batteryManager.getLongProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW)
+            val currentMa = abs(currentUa / 1000f)
             
-            Box(modifier = Modifier.height(150.dp).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                Box(modifier = Modifier.graphicsLayer(scaleX = scale, scaleY = scale)) {
-                    ThreeDView(angles.first, angles.second, gData)
+            val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            voltageMv = intent?.getIntExtra(BatteryManager.EXTRA_VOLTAGE, 0)?.toFloat() ?: 0f
+            tempC = (intent?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0) / 10f
+
+            sampleBuffer.add(currentMa)
+            if (sampleBuffer.size > 40) sampleBuffer.removeAt(0) // Keep last 2 seconds
+            delay(50)
+        }
+    }
+
+    // 2. Advanced Hardware Profiling & Stabilization (Every 1s)
+    LaunchedEffect(Unit) {
+        while (true) {
+            if (sampleBuffer.size >= 10) {
+                // Stabilize: Sort and remove top/bottom 20% peaks
+                val sorted = sampleBuffer.sorted()
+                val trimCount = (sorted.size * 0.2).toInt()
+                val subList = sorted.subList(trimCount, sorted.size - trimCount)
+                stableCurrentMa = subList.average().toFloat()
+
+                // Update graph data
+                if (isMonitoring) {
+                    graphData.add((stableCurrentMa - offsetMa).coerceAtLeast(0f))
+                    if (graphData.size > 50) graphData.removeAt(0)
+                } else {
+                    graphData.clear()
+                }
+
+                // GET SYSTEM STATES for better estimation
+                val brightness = try {
+                    Settings.System.getInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS)
+                } catch (e: Exception) { 128 }
+                
+                val isWifiOn = try {
+                    wifiManager.isWifiEnabled
+                } catch (e: Exception) {
+                    false
+                }
+                val tempFactor = (tempC - 25f).coerceAtLeast(0f) / 10f // Increase AP usage if hot
+
+                // Calculate weights dynamically
+                val displayWeight = (brightness / 255f) * 0.6f + 0.1f
+                val wifiWeight = if (isWifiOn) 0.15f else 0.05f
+                val apWeight = 0.2f + (tempFactor * 0.15f)
+                val baseWeight = 1.0f - (displayWeight + wifiWeight + apWeight).coerceAtMost(0.9f)
+
+                hwBreakdown = listOf(
+                    HardwareUsage("Display (OLED)", stableCurrentMa * displayWeight, Color(0xFF2196F3), displayWeight),
+                    HardwareUsage("AP (CPU/GPU)", stableCurrentMa * apWeight, Color(0xFFF44336), apWeight),
+                    HardwareUsage("Radios (WiFi/LTE)", stableCurrentMa * wifiWeight, Color(0xFF4CAF50), wifiWeight),
+                    HardwareUsage("System Core", stableCurrentMa * baseWeight, Color(0xFF9E9E9E), baseWeight)
+                )
+            }
+            delay(1000)
+        }
+    }
+
+    Column(modifier = modifier.fillMaxSize().padding(20.dp)) {
+        Text("PowerMeter Pro", fontSize = 32.sp, fontWeight = FontWeight.Black, color = Color.Black)
+        
+        // ADB Manual Grant Hint - Updated with correct package name
+        Card(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF9C4))
+        ) {
+            Text(
+                "정밀 모드: 'adb shell pm grant com.example.complementary_filter android.permission.BATTERY_STATS' 실행 권장",
+                fontSize = 10.sp, color = Color.DarkGray, modifier = Modifier.padding(8.dp)
+            )
+        }
+
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+            InfoBox("Voltage", "${"%.1f".format(voltageMv / 1000f)} V")
+            InfoBox("Stable", "${"%.1f".format(stableCurrentMa)} mA")
+            val powerMw = stableCurrentMa * (voltageMv / 1000f)
+            InfoBox("Power", "${"%.0f".format(powerMw)} mW")
+        }
+
+        Spacer(modifier = Modifier.height(20.dp))
+
+        // Monitor Card
+        val usbCurrent = if (isMonitoring) (stableCurrentMa - offsetMa).coerceAtLeast(0f) else 0f
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = if(isMonitoring) Color.Black else Color(0xFFEEEEEE)),
+            shape = RoundedCornerShape(20.dp)
+        ) {
+            Column(modifier = Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(if(isMonitoring) "EXTERNAL USB CURRENT" else "READY TO MONITOR", color = if(isMonitoring) Color.Green else Color.Gray, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                Text(if(isMonitoring) "${"%.1f".format(usbCurrent)} mA" else "--", color = if(isMonitoring) Color.White else Color.LightGray, fontSize = 48.sp, fontWeight = FontWeight.Black)
+                if (isMonitoring) {
+                    Text("Power: ${"%.1f".format(usbCurrent * voltageMv / 1000f)} mW", color = Color.Gray, fontSize = 14.sp)
+                    Spacer(modifier = Modifier.height(16.dp))
+                    RealTimeGraph(data = graphData, modifier = Modifier.fillMaxWidth().height(80.dp))
                 }
             }
         }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        Text("Dynamic Hardware Breakdown", fontWeight = FontWeight.ExtraBold, fontSize = 18.sp)
+        Spacer(modifier = Modifier.height(8.dp))
+
+        LazyColumn(modifier = Modifier.weight(1f)) {
+            items(hwBreakdown) { hw ->
+                HardwareLine(hw)
+            }
+        }
+
+        // Buttons
+        Row(modifier = Modifier.fillMaxWidth().padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Button(
+                onClick = { offsetMa = stableCurrentMa },
+                modifier = Modifier.weight(1f).height(60.dp),
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF424242))
+            ) { Text("영점 조정", fontWeight = FontWeight.Bold) }
+            
+            Button(
+                onClick = { isMonitoring = !isMonitoring },
+                modifier = Modifier.weight(1f).height(60.dp),
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = if(isMonitoring) Color.Red else Color(0xFF2E7D32))
+            ) { Text(if(isMonitoring) "중지" else "모니터링", fontWeight = FontWeight.Bold) }
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        Button(
+            onClick = { showReport = true },
+            modifier = Modifier.fillMaxWidth().height(56.dp),
+            shape = RoundedCornerShape(12.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = Color.Black)
+        ) { Text("결과 리포트", fontWeight = FontWeight.Bold) }
+    }
+
+    if (showReport) {
+        ReportDialog(stableCurrentMa, offsetMa, hwBreakdown, onDismiss = { showReport = false })
     }
 }
 
 @Composable
-fun ThreeDView(roll: Float, pitch: Float, accel: FloatArray) {
-    Canvas(modifier = Modifier.size(110.dp, 140.dp)) {
-        val center = Offset(size.width / 2, size.height / 2)
-        val viewScale = size.width / 130f
-        
-        fun project(x: Float, y: Float, z: Float): Offset {
-            val rRoll = Math.toRadians(roll.toDouble()).toFloat()
-            val rPitch = Math.toRadians(pitch.toDouble()).toFloat()
-            val y1 = y * cos(rPitch) - z * sin(rPitch)
-            val z1 = y * sin(rPitch) + z * cos(rPitch)
-            val x2 = x * cos(rRoll) + z1 * sin(rRoll)
-            val z2 = -x * sin(rRoll) + z1 * cos(rRoll)
-            val pFactor = 400f / (400f + z2)
-            return center + Offset(x2 * pFactor * viewScale, -y1 * pFactor * viewScale)
-        }
+fun RealTimeGraph(data: List<Float>, modifier: Modifier = Modifier) {
+    Canvas(modifier = modifier) {
+        if (data.size < 2) return@Canvas
 
-        val w = 45f; val h = 80f; val d = 10f
-        val corners = listOf(
-            project(-w, -h, -d), project(w, -h, -d), project(w, h, -d), project(-w, h, -d),
-            project(-w, -h, d),  project(w, -h, d),  project(w, h, d),  project(-w, h, d)
-        )
-        
-        val edges = listOf(0 to 1, 1 to 2, 2 to 3, 3 to 0, 4 to 5, 5 to 6, 6 to 7, 7 to 4, 0 to 4, 1 to 5, 2 to 6, 3 to 7)
-        edges.forEach { (i, j) -> drawLine(Color.Black.copy(alpha = 0.4f), corners[i], corners[j], strokeWidth = 2f) }
-        
-        val frontPath = Path().apply {
-            moveTo(corners[4].x, corners[4].y); lineTo(corners[5].x, corners[5].y)
-            lineTo(corners[6].x, corners[6].y); lineTo(corners[7].x, corners[7].y); close()
-        }
-        drawPath(frontPath, Color.Gray.copy(alpha = 0.2f))
+        val maxVal = (data.maxOrNull() ?: 100f).coerceAtLeast(100f) * 1.2f
+        val width = size.width
+        val height = size.height
+        val stepX = width / 49f
 
-        val axisLen = 70f
-        val origin = project(0f, 0f, 0f)
-        val ax = accel[0]; val ay = accel[1]; val az = accel[2]
-        val mag = sqrt(ax*ax + ay*ay + az*az).coerceAtLeast(0.1f)
-        
-        val gEnd = project(-ax/mag * axisLen, -ay/mag * axisLen, az/mag * axisLen)
-        drawLine(Color.Black, origin, gEnd, strokeWidth = 10f, cap = StrokeCap.Round)
-        
-        val dx = gEnd.x - origin.x; val dy = gEnd.y - origin.y
-        val ang = atan2(dy, dx)
-        drawLine(Color.Black, gEnd, gEnd - Offset(cos(ang-0.5f)*15f, sin(ang-0.5f)*15f), strokeWidth = 10f)
-        drawLine(Color.Black, gEnd, gEnd - Offset(cos(ang+0.5f)*15f, sin(ang+0.5f)*15f), strokeWidth = 10f)
-
-        drawContext.canvas.nativeCanvas.apply {
-            val p = android.graphics.Paint().apply {
-                this.color = android.graphics.Color.BLACK; this.textSize = 28f; this.isFakeBoldText = true; this.textAlign = android.graphics.Paint.Align.CENTER
+        val path = Path().apply {
+            val startY = height - (data[0] / maxVal * height)
+            moveTo(0f, startY)
+            data.forEachIndexed { index, value ->
+                val x = index * stepX
+                val y = height - (value / maxVal * height)
+                lineTo(x, y)
             }
-            drawText("중력", gEnd.x, gEnd.y + 40f, p)
         }
+
+        drawPath(
+            path = path,
+            color = Color.Green,
+            style = Stroke(width = 3.dp.toPx())
+        )
     }
+}
+
+@Composable
+fun InfoBox(label: String, value: String) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(label, fontSize = 11.sp, color = Color.Gray)
+        Text(value, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color.Black)
+    }
+}
+
+@Composable
+fun HardwareLine(hw: HardwareUsage) {
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(modifier = Modifier.size(10.dp).background(hw.color, RoundedCornerShape(2.dp)))
+            Spacer(modifier = Modifier.width(10.dp))
+            Text(hw.name, modifier = Modifier.weight(1f), fontSize = 14.sp, color = Color.Black)
+            Text("${"%.1f".format(hw.currentMa)} mA", fontWeight = FontWeight.Black, color = Color.Black)
+        }
+        LinearProgressIndicator(
+            progress = { hw.factor },
+            modifier = Modifier.fillMaxWidth().padding(top = 4.dp).height(4.dp),
+            color = hw.color,
+            trackColor = Color.LightGray.copy(alpha = 0.3f)
+        )
+    }
+}
+
+@Composable
+fun ReportDialog(total: Float, offset: Float, breakdown: List<HardwareUsage>, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Power Analysis Report", fontWeight = FontWeight.Black) },
+        text = {
+            Column {
+                Text("Total Average: ${"%.1f".format(total)} mA", fontWeight = FontWeight.Bold)
+                Text("System Baseline: ${"%.1f".format(offset)} mA")
+                Text("USB Net Draw: ${"%.1f".format((total - offset).coerceAtLeast(0f))} mA", color = Color(0xFF2E7D32), fontWeight = FontWeight.Bold)
+                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+                breakdown.forEach {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(it.name, fontSize = 13.sp)
+                        Text("${"%.1f".format(it.currentMa)} mA", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        },
+        confirmButton = { Button(onClick = onDismiss) { Text("OK") } }
+    )
 }
